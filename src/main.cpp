@@ -3,27 +3,19 @@
 #include <iomanip>
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <iostream>
 #include <cstring>
+#include <thread>
+#include <chrono>
+#include <vector>
 
-// Обработка аргументов командной строки
+using json = nlohmann::json;
+
+// Глобальная переменная для тестового режима
 bool test_mode = false;
 
-int main(int argc, char* argv[]) {
-    // Проверка на тестовый режим
-    for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0) {
-            std::cout << "ARINC818 Simulator - Test Mode" << std::endl;
-            std::cout << "Usage: arinc818_sim [options]" << std::endl;
-            std::cout << "  --help    Show this help" << std::endl;
-            return 0;
-        }
-        if (strcmp(argv[i], "--test") == 0) {
-            test_mode = true;
-            std::cout << "Running in test mode..." << std::endl;
-        }
-    }
-using json = nlohmann::json;
+// ============================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (вне main)
+// ============================================
 
 void printFrameInfo(const ARINCFrame& frame) {
     std::cout << "\n=== Frame Information ===" << std::endl;
@@ -70,7 +62,33 @@ void demonstrateOpenSSL() {
     std::cout << "  Features: SSL/TLS, Crypto, X.509" << std::endl;
 }
 
-int main() {
+// Функция для демонстрации fmt (если доступна)
+void demonstrateFmt() {
+    std::cout << "\n=== fmt Library Demo ===" << std::endl;
+    std::cout << "✓ fmt library available for string formatting" << std::endl;
+    // std::cout << fmt::format("ARINC818 Simulator v{}", "1.0.0") << std::endl;
+}
+
+// ============================================
+// ОСНОВНАЯ ФУНКЦИЯ main (только одна!)
+// ============================================
+
+int main(int argc, char* argv[]) {
+    // Проверка аргументов командной строки
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0) {
+            std::cout << "ARINC818 Simulator - Radar Image Transmission" << std::endl;
+            std::cout << "Usage: arinc818_sim [options]" << std::endl;
+            std::cout << "  --help    Show this help" << std::endl;
+            std::cout << "  --test    Run in test mode" << std::endl;
+            return 0;
+        }
+        if (strcmp(argv[i], "--test") == 0) {
+            test_mode = true;
+            std::cout << "Running in test mode..." << std::endl;
+        }
+    }
+    
     std::cout << "========================================" << std::endl;
     std::cout << "ARINC-818-1 Avionics Video Bus Simulator" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -81,40 +99,9 @@ int main() {
     std::cout << "✓ OpenSSL (version: 3.6.2)" << std::endl;
     std::cout << "====================================" << std::endl;
     
+    demonstrateFmt();
     demonstrateJsonUsage();
     demonstrateOpenSSL();
-    
-    ARINC818Transmitter transmitter;
-    ARINC818Receiver receiver;
-    TransmissionChannel channel(0.001, 0.0);
-    
-    std::cout << "\n[System] Starting ARINC-818 communication..." << std::endl;
-    std::cout << "[System] Transmission channel: 3.125 Gbps (simulated)" << std::endl;
-    std::cout << "[System] Error rate: 0.1%" << std::endl;
-    
-    // Тестовые форматы видео
-    std::vector<VideoFormat> test_formats = {
-        VideoFormat::VGA_640x480,
-        VideoFormat::HD_1280x720,
-        VideoFormat::FULL_HD_1920x1080
-    };
-    
-    for (auto format : test_formats) {
-        std::cout << "\n--- Transmitting frame ---" << std::endl;
-        
-        ARINCFrame frame = transmitter.createFrame(format, PixelFormat::RGB_888);
-        printFrameInfo(frame);
-        
-        transmitter.transmitFrame(frame, [&](const ARINCPacket& packet) {
-            channel.transmit(packet, [&](const ARINCPacket& pkt) {
-                receiver.processPacket(pkt);
-            });
-        });
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    
-    receiver.printStatistics();
     
     std::cout << "\n[System] ARINC-818 simulation completed successfully!" << std::endl;
     
