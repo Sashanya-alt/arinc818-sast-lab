@@ -1,0 +1,9 @@
+{
+  "name": "arinc818-simulator",
+  "version": "1.0.0",
+  "dependencies": [
+    "fmt",
+    "nlohmann-json",
+    "openssl"
+  ]
+}

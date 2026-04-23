@@ -1,0 +1,60 @@
+﻿# Build directories
+build/
+build_*/
+*/build/
+*/build_*/
+
+# IDE files
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Compiled files
+*.exe
+*.dll
+*.so
+*.obj
+*.o
+*.lib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# vcpkg
+vcpkg_installed/
+vcpkg/
+.vcpkg/
+*.vcpkg*
+
+# Debug and Release
+Debug/
+Release/
+x64/
+x86/
+
+# Logs
+*.log
+*.tmp
+*.temp
+
+# Reports (уже есть в артефактах, не храним в репозитории)
+sbom*.json
+trivy*.json
+semgrep*.json
+valgrind*.log
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Other
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.recipe
+*.tlog

@@ -1,0 +1,208 @@
+﻿# DevSecOps CI/CD Pipeline для ARINC818 Simulator
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  BUILD_DIR: build_ci
+  EXE_NAME: arinc818_sim
+
+jobs:
+  # JOB 1: СБОРКА
+  build:
+    name: 🔨 Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ git
+      
+      - name: Setup vcpkg
+        run: |
+          git clone https://github.com/Microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.sh
+          ./vcpkg/vcpkg install fmt nlohmann-json openssl
+      
+      - name: Build project
+        run: |
+          mkdir -p ${{ env.BUILD_DIR }}
+          cd ${{ env.BUILD_DIR }}
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
+          cmake --build . --target ${{ env.EXE_NAME }}
+      
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifact
+          path: ${{ env.BUILD_DIR }}/${{ env.EXE_NAME }}
+          retention-days: 7
+
+  # JOB 2: SAST - Semgrep
+  sast:
+    name: 🔍 SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/security-audit
+          output: semgrep.json
+          output_format: json
+      
+      - name: Upload SAST report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-report
+          path: semgrep.json
+          retention-days: 7
+
+  # JOB 3: SCA - Trivy
+  sca:
+    name: 📦 SCA (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy (SBOM)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          format: cyclonedx
+          output: sbom_ci.json
+      
+      - name: Run Trivy (Vulnerabilities)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          severity: CRITICAL,HIGH
+          format: json
+          output: trivy_ci.json
+      
+      - name: Upload SCA reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-reports
+          path: |
+            sbom_ci.json
+            trivy_ci.json
+          retention-days: 7
+
+  # JOB 4: DAST - Valgrind
+  dast:
+    name: 🐛 DAST (Valgrind)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifact
+          path: build_ci
+      
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+      
+      - name: Build debug version
+        run: |
+          mkdir -p build_debug
+          cd build_debug
+          cmake .. -DCMAKE_BUILD_TYPE=Debug
+          cmake --build . --target ${{ env.EXE_NAME }}
+      
+      - name: Run Valgrind
+        run: |
+          chmod +x build_debug/${{ env.EXE_NAME }}
+          valgrind --leak-check=full \
+                   --error-exitcode=1 \
+                   --log-file=valgrind.log \
+                   --track-origins=yes \
+                   ./build_debug/${{ env.EXE_NAME }} --help 2>&1 || true
+      
+      - name: Upload Valgrind log
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-report
+          path: valgrind.log
+          retention-days: 7
+
+  # JOB 5: SECURITY GATE
+  security-gate:
+    name: 🔒 Security Gate
+    runs-on: ubuntu-latest
+    needs: [sast, sca, dast]
+    if: always()
+    steps:
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+      
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      
+      - name: Check Security Gate
+        run: |
+          echo "========================================="
+          echo "🔒 SECURITY GATE - ARINC818 Simulator"
+          echo "========================================="
+          
+          SAST_ERRORS=0
+          SAST_WARNINGS=0
+          if [ -f "reports/sast-report/semgrep.json" ]; then
+            SAST_ERRORS=$(jq '[.results[] | select(.extra.severity=="ERROR")] | length' reports/sast-report/semgrep.json 2>/dev/null || echo "0")
+            SAST_WARNINGS=$(jq '[.results[] | select(.extra.severity=="WARNING")] | length' reports/sast-report/semgrep.json 2>/dev/null || echo "0")
+            echo "📊 SAST (Semgrep):"
+            echo "   Ошибок ERROR: $SAST_ERRORS"
+            echo "   Предупреждений: $SAST_WARNINGS"
+          else
+            echo "⚠️  SAST: файл отчёта не найден"
+          fi
+          
+          SCA_CRIT=0
+          SCA_HIGH=0
+          if [ -f "reports/sca-reports/trivy_ci.json" ]; then
+            SCA_CRIT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' reports/sca-reports/trivy_ci.json 2>/dev/null || echo "0")
+            SCA_HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' reports/sca-reports/trivy_ci.json 2>/dev/null || echo "0")
+            echo "📊 SCA (Trivy):"
+            echo "   Критических: $SCA_CRIT"
+            echo "   Высоких: $SCA_HIGH"
+          else
+            echo "⚠️  SCA: файл отчёта не найден"
+          fi
+          
+          VALGRIND_ERRORS=0
+          if [ -f "reports/dast-report/valgrind.log" ]; then
+            if grep -q "ERROR SUMMARY: [1-9]" reports/dast-report/valgrind.log 2>/dev/null; then
+              VALGRIND_ERRORS=$(grep "ERROR SUMMARY:" reports/dast-report/valgrind.log | grep -o '[0-9]\+' | head -1)
+              echo "📊 DAST (Valgrind):"
+              echo "   Ошибок памяти: $VALGRIND_ERRORS"
+            else
+              echo "✅ DAST: ошибок памяти не найдено"
+            fi
+          else
+            echo "⚠️  DAST: файл лога не найден"
+          fi
+          
+          echo "========================================="
+          if [ $SAST_ERRORS -gt 0 ] || [ $SCA_CRIT -gt 0 ]; then
+            echo "❌ SECURITY GATE: СБОРКА ЗАБЛОКИРОВАНА!"
+            exit 1
+          else
+            echo "✅ SECURITY GATE ПРОЙДЕН!"
+          fi

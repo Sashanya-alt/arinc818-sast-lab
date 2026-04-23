@@ -1,0 +1,183 @@
+﻿# CI/CD Pipeline для ARINC818 Simulator
+# DevSecOps: SAST + SCA + DAST + Security Gate
+
+stages:
+  - build
+  - sast
+  - sca
+  - dast
+  - security_gate
+
+variables:
+  BUILD_DIR: "build_ci"
+  EXE_NAME: "arinc818_sim"
+
+# ============================================
+# СТАДИЯ 1: СБОРКА
+# ============================================
+build:
+  stage: build
+  image: gcc:latest
+  before_script:
+    - apt-get update
+    - apt-get install -y cmake ninja-build git
+    # Установка vcpkg для зависимостей
+    - git clone https://github.com/Microsoft/vcpkg.git
+    - ./vcpkg/bootstrap-vcpkg.sh
+    - ./vcpkg/vcpkg install fmt nlohmann-json openssl
+  script:
+    - mkdir -p $BUILD_DIR
+    - cd $BUILD_DIR
+    - cmake .. -DCMAKE_TOOLCHAIN_FILE=../vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
+    - cmake --build . --target $EXE_NAME
+    - ls -la $EXE_NAME
+  artifacts:
+    paths:
+      - $BUILD_DIR/$EXE_NAME
+    expire_in: 1 week
+
+# ============================================
+# СТАДИЯ 2: SAST - Статический анализ кода (Semgrep)
+# ============================================
+sast:
+  stage: sast
+  image: returntocorp/semgrep:latest
+  script:
+    # Анализ исходного кода
+    - semgrep --config p/security-audit --lang cpp --json -o semgrep.json src/ include/
+    # Дополнительная проверка CWE Top 25
+    - semgrep --config p/cwe-top-25 --lang cpp --json -o semgrep-cwe.json src/ include/ || true
+  artifacts:
+    paths:
+      - semgrep.json
+      - semgrep-cwe.json
+    expire_in: 1 week
+  allow_failure: false
+
+# ============================================
+# СТАДИЯ 3: SCA - Анализ зависимостей (Trivy)
+# ============================================
+sca:
+  stage: sca
+  image: aquasec/trivy:latest
+  script:
+    # Генерация SBOM
+    - trivy fs --format cyclonedx --output sbom_ci.json .
+    # Поиск уязвимостей в зависимостях
+    - trivy fs --severity CRITICAL,HIGH --format json --output trivy_ci.json .
+    # Проверка vcpkg.json
+    - cat vcpkg.json
+  artifacts:
+    paths:
+      - sbom_ci.json
+      - trivy_ci.json
+    expire_in: 1 week
+
+# ============================================
+# СТАДИЯ 4: DAST - Динамический анализ (Valgrind)
+# ============================================
+dast:
+  stage: dast
+  image: gcc:latest
+  before_script:
+    - apt-get update
+    - apt-get install -y valgrind cmake
+    # Сборка с отладочной информацией
+    - mkdir -p build_debug
+    - cd build_debug
+    - cmake .. -DCMAKE_BUILD_TYPE=Debug
+    - cmake --build . --target $EXE_NAME
+    - cd ..
+  script:
+    # Проверка на утечки памяти
+    - valgrind --leak-check=full 
+               --error-exitcode=1 
+               --log-file=valgrind.log 
+               --track-origins=yes
+               ./build_debug/$EXE_NAME --help 2>&1 || true
+    # Запуск основной программы с таймаутом
+    - timeout 5s ./build_debug/$EXE_NAME 2>&1 || true
+  artifacts:
+    paths:
+      - valgrind.log
+    expire_in: 1 week
+    when: always
+  dependencies:
+    - build
+
+# ============================================
+# СТАДИЯ 5: SECURITY GATE
+# ============================================
+security_gate:
+  stage: security_gate
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache jq
+  script:
+    - |
+      echo "========================================="
+      echo "🔒 SECURITY GATE - ARINC818 Simulator"
+      echo "========================================="
+      
+      # Проверка SAST
+      SAST_ERRORS=0
+      SAST_WARNINGS=0
+      if [ -f "semgrep.json" ]; then
+        SAST_ERRORS=$(jq '[.results[] | select(.extra.severity=="ERROR")] | length' semgrep.json 2>/dev/null || echo "0")
+        SAST_WARNINGS=$(jq '[.results[] | select(.extra.severity=="WARNING")] | length' semgrep.json 2>/dev/null || echo "0")
+        echo "📊 SAST (Semgrep):"
+        echo "   Ошибок ERROR: $SAST_ERRORS"
+        echo "   Предупреждений: $SAST_WARNINGS"
+      else
+        echo "⚠️  SAST: файл отчёта не найден"
+      fi
+      
+      # Проверка SCA
+      SCA_CRIT=0
+      SCA_HIGH=0
+      if [ -f "trivy_ci.json" ]; then
+        SCA_CRIT=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy_ci.json 2>/dev/null || echo "0")
+        SCA_HIGH=$(jq '[.Results[].Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy_ci.json 2>/dev/null || echo "0")
+        echo "📊 SCA (Trivy):"
+        echo "   Критических: $SCA_CRIT"
+        echo "   Высоких: $SCA_HIGH"
+      else
+        echo "⚠️  SCA: файл отчёта не найден"
+      fi
+      
+      # Проверка DAST
+      VALGRIND_ERRORS=0
+      if [ -f "valgrind.log" ]; then
+        if grep -q "ERROR SUMMARY: [1-9]" valgrind.log 2>/dev/null; then
+          VALGRIND_ERRORS=$(grep "ERROR SUMMARY:" valgrind.log | grep -o '[0-9]\+' | head -1)
+          echo "📊 DAST (Valgrind):"
+          echo "   Ошибок памяти: $VALGRIND_ERRORS"
+        else
+          echo "✅ DAST: ошибок памяти не найдено"
+        fi
+      else
+        echo "⚠️  DAST: файл лога не найден"
+      fi
+      
+      # Принятие решения
+      echo "========================================="
+      if [ $SAST_ERRORS -gt 0 ] || [ $SCA_CRIT -gt 0 ]; then
+        echo "❌ SECURITY GATE: СБОРКА ЗАБЛОКИРОВАНА!"
+        echo "   Причины:"
+        [ $SAST_ERRORS -gt 0 ] && echo "   - SAST: найдено $SAST_ERRORS критических ошибок в коде"
+        [ $SCA_CRIT -gt 0 ] && echo "   - SCA: найдено $SCA_CRIT критических уязвимостей в зависимостях"
+        exit 1
+      else
+        echo "✅ SECURITY GATE ПРОЙДЕН!"
+        echo "   Критических проблем не обнаружено"
+        if [ $SAST_WARNINGS -gt 0 ]; then
+          echo "⚠️  Рекомендуется исправить $SAST_WARNINGS предупреждений"
+        fi
+        if [ $SCA_HIGH -gt 0 ]; then
+          echo "⚠️  Рекомендуется проверить $SCA_HIGH высокорисковых уязвимостей"
+        fi
+      fi
+  dependencies:
+    - sast
+    - sca
+    - dast
