@@ -13,7 +13,9 @@ env:
   EXE_NAME: arinc818_sim
 
 jobs:
+  # ============================================
   # JOB 1: СБОРКА
+  # ============================================
   build:
     name: 🔨 Build
     runs-on: ubuntu-latest
@@ -24,11 +26,11 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ git
+          sudo apt-get install -y cmake g++ git
       
       - name: Setup vcpkg
         run: |
-          git clone https://github.com/Microsoft/vcpkg.git
+          git clone --depth=1 https://github.com/Microsoft/vcpkg.git
           ./vcpkg/bootstrap-vcpkg.sh
           ./vcpkg/vcpkg install fmt nlohmann-json openssl
       
@@ -46,7 +48,9 @@ jobs:
           path: ${{ env.BUILD_DIR }}/${{ env.EXE_NAME }}
           retention-days: 7
 
-  # JOB 2: SAST - Semgrep
+  # ============================================
+  # JOB 2: SAST - Semgrep (ИСПРАВЛЕН)
+  # ============================================
   sast:
     name: 🔍 SAST (Semgrep)
     runs-on: ubuntu-latest
@@ -55,11 +59,9 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: p/security-audit
-          output: semgrep.json
-          output_format: json
+        run: |
+          pip install semgrep
+          semgrep --config p/security-audit --lang cpp --json -o semgrep.json src/ include/
       
       - name: Upload SAST report
         uses: actions/upload-artifact@v4
@@ -68,7 +70,9 @@ jobs:
           path: semgrep.json
           retention-days: 7
 
+  # ============================================
   # JOB 3: SCA - Trivy
+  # ============================================
   sca:
     name: 📦 SCA (Trivy)
     runs-on: ubuntu-latest
@@ -77,19 +81,14 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Run Trivy (SBOM)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          format: cyclonedx
-          output: sbom_ci.json
+        run: |
+          wget https://github.com/aquasecurity/trivy/releases/download/v0.49.0/trivy_0.49.0_Linux-64bit.deb
+          sudo dpkg -i trivy_0.49.0_Linux-64bit.deb
+          trivy fs --format cyclonedx --output sbom_ci.json .
       
       - name: Run Trivy (Vulnerabilities)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          severity: CRITICAL,HIGH
-          format: json
-          output: trivy_ci.json
+        run: |
+          trivy fs --severity CRITICAL,HIGH --format json --output trivy_ci.json .
       
       - name: Upload SCA reports
         uses: actions/upload-artifact@v4
@@ -100,7 +99,9 @@ jobs:
             trivy_ci.json
           retention-days: 7
 
-  # JOB 4: DAST - Valgrind
+  # ============================================
+  # JOB 4: DAST - Valgrind (ИСПРАВЛЕН)
+  # ============================================
   dast:
     name: 🐛 DAST (Valgrind)
     runs-on: ubuntu-latest
@@ -115,15 +116,17 @@ jobs:
           name: build-artifact
           path: build_ci
       
-      - name: Install Valgrind
-        run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Install Valgrind and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind cmake g++
       
       - name: Build debug version
         run: |
           mkdir -p build_debug
           cd build_debug
           cmake .. -DCMAKE_BUILD_TYPE=Debug
-          cmake --build . --target ${{ env.EXE_NAME }}
+          cmake --build .
       
       - name: Run Valgrind
         run: |
@@ -141,7 +144,9 @@ jobs:
           path: valgrind.log
           retention-days: 7
 
-  # JOB 5: SECURITY GATE
+  # ============================================
+  # JOB 5: SECURITY GATE (ИСПРАВЛЕН)
+  # ============================================
   security-gate:
     name: 🔒 Security Gate
     runs-on: ubuntu-latest
@@ -162,6 +167,7 @@ jobs:
           echo "🔒 SECURITY GATE - ARINC818 Simulator"
           echo "========================================="
           
+          # Проверка SAST
           SAST_ERRORS=0
           SAST_WARNINGS=0
           if [ -f "reports/sast-report/semgrep.json" ]; then
@@ -171,9 +177,10 @@ jobs:
             echo "   Ошибок ERROR: $SAST_ERRORS"
             echo "   Предупреждений: $SAST_WARNINGS"
           else
-            echo "⚠️  SAST: файл отчёта не найден"
+            echo "⚠️  SAST: файл отчёта не найден, но это не блокирует"
           fi
           
+          # Проверка SCA
           SCA_CRIT=0
           SCA_HIGH=0
           if [ -f "reports/sca-reports/trivy_ci.json" ]; then
@@ -186,6 +193,7 @@ jobs:
             echo "⚠️  SCA: файл отчёта не найден"
           fi
           
+          # Проверка DAST
           VALGRIND_ERRORS=0
           if [ -f "reports/dast-report/valgrind.log" ]; then
             if grep -q "ERROR SUMMARY: [1-9]" reports/dast-report/valgrind.log 2>/dev/null; then
@@ -199,9 +207,13 @@ jobs:
             echo "⚠️  DAST: файл лога не найден"
           fi
           
+          # Принятие решения
           echo "========================================="
           if [ $SAST_ERRORS -gt 0 ] || [ $SCA_CRIT -gt 0 ]; then
             echo "❌ SECURITY GATE: СБОРКА ЗАБЛОКИРОВАНА!"
+            echo "   Причины:"
+            [ $SAST_ERRORS -gt 0 ] && echo "   - SAST: найдено $SAST_ERRORS критических ошибок"
+            [ $SCA_CRIT -gt 0 ] && echo "   - SCA: найдено $SCA_CRIT критических уязвимостей"
             exit 1
           else
             echo "✅ SECURITY GATE ПРОЙДЕН!"
